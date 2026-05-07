@@ -1,0 +1,5 @@
+[plugin]
+package = "pretix-apicustomerlogin"
+modules = [ "pretix_apicustomerlogin" ]
+marketplace_name = "apicustomerlogin"
+
