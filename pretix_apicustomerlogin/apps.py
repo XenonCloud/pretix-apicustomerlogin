@@ -16,7 +16,9 @@ class PluginApp(PluginConfig):
     class PretixPluginMeta:
         name = gettext_lazy("API Customer Login")
         author = "XenonCloud"
-        description = gettext_lazy("Provides api endpoints for customer login and password change")
+        description = gettext_lazy(
+            "Provides api endpoints for customer login and password change"
+        )
         visible = True
         version = __version__
         category = "API"
