@@ -1,5 +1,6 @@
 from pretix.api.serializers.organizer import CustomerSerializer
 from pretix.base.models import Customer, Order, OrderPayment
+from pretix.plugins.paypal.models import ReferencedPayPalObject
 from pretix.plugins.stripe.models import ReferencedStripeObject
 from rest_framework import serializers, status
 from rest_framework.decorators import action
@@ -119,6 +120,35 @@ class OrderPaymentViewSet(ViewSet):
             )
 
         obj, created = ReferencedStripeObject.objects.get_or_create(
+            reference=reference,
+            defaults={"order": order, "payment": payment},
+        )
+
+        return Response(
+            {
+                "id": obj.pk,
+                "reference": obj.reference,
+                "order": order.code,
+                "payment": payment.full_id,
+                "created": created,
+            },
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["POST"], url_path="add_paypal_reference")
+    def add_paypal_reference(self, request, **kwargs):
+        order, payment, res = self._get_payment(request, **kwargs)
+        if res is not None:
+            return res
+
+        reference = request.data.get("reference")
+        if not reference:
+            return Response(
+                {"detail": "reference is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        obj, created = ReferencedPayPalObject.objects.get_or_create(
             reference=reference,
             defaults={"order": order, "payment": payment},
         )
