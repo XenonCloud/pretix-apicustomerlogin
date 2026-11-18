@@ -1,6 +1,14 @@
-from pretix.api.serializers.organizer import CustomerSerializer
-from pretix.base.models import Customer, Order, OrderPayment
-from pretix.plugins.paypal.models import ReferencedPayPalObject
+from datetime import datetime, time
+from decimal import Decimal
+from django.db import transaction
+from django.shortcuts import get_object_or_404
+from django.utils.timezone import make_aware, now
+from pretix.api.serializers.order import OrderRefundSerializer
+from pretix.api.serializers.organizer import CustomerSerializer, GiftCardSerializer
+from pretix.base.models import Customer, Order, OrderPayment, OrderRefund
+from pretix.base.payment import GiftCardPayment, PaymentException
+from pretix.helpers import OF_SELF
+from pretix.plugins.paypal2.models import ReferencedPayPalObject
 from pretix.plugins.stripe.models import ReferencedStripeObject
 from rest_framework import serializers, status
 from rest_framework.decorators import action
@@ -189,4 +197,118 @@ class OrderPaymentViewSet(ViewSet):
                 "info": payment.info_data,
             },
             status=status.HTTP_200_OK,
+        )
+
+
+class GiftCardRefundSerializer(serializers.Serializer):
+    order_code = serializers.CharField(required=True, allow_blank=False)
+    amount = serializers.DecimalField(
+        max_digits=13, decimal_places=2, min_value=Decimal("0.01"), required=False
+    )
+    comment = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    expires = serializers.DateField(required=False, allow_null=True)
+    conditions = serializers.CharField(
+        required=False, allow_blank=True, allow_null=True
+    )
+
+
+class GiftCardRefundViewSet(ViewSet):
+    permission = "event.orders:read"
+    write_permission = "event.orders:write"
+
+    @action(detail=False, methods=["POST"], url_path="create")
+    def refund(self, request, **kwargs):
+        serializer = GiftCardRefundSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        order = get_object_or_404(Order, event=request.event, code=data["order_code"])
+        user = request.user if request.user.is_authenticated else None
+
+        with transaction.atomic():
+            order = Order.objects.select_for_update(of=OF_SELF).get(pk=order.pk)
+            refundable = order.payment_refund_sum
+            amount = data.get("amount")
+            if amount is None:
+                amount = refundable
+            if amount <= Decimal("0.00"):
+                raise serializers.ValidationError(
+                    {"amount": "No refundable amount is available for this order."}
+                )
+            if amount > refundable:
+                raise serializers.ValidationError(
+                    {
+                        "amount": "Refund amount cannot exceed the refundable amount "
+                        "of the order."
+                    }
+                )
+
+            if "expires" in data:
+                expires = data["expires"]
+                if expires is not None:
+                    expires = make_aware(
+                        datetime.combine(expires, time(hour=23, minute=59, second=59)),
+                        request.event.timezone,
+                    )
+            else:
+                expires = request.organizer.default_gift_card_expiry
+
+            giftcard = request.organizer.issued_gift_cards.create(
+                expires=expires,
+                currency=request.event.currency,
+                customer=order.customer,
+                testmode=order.testmode,
+                conditions=data.get("conditions"),
+            )
+            giftcard.log_action(
+                "pretix.giftcards.created", data={}, user=user, auth=request.auth
+            )
+
+            refund = OrderRefund(
+                order=order,
+                payment=None,
+                source=OrderRefund.REFUND_SOURCE_ADMIN,
+                state=OrderRefund.REFUND_STATE_CREATED,
+                execution_date=now(),
+                amount=amount,
+                provider="giftcard",
+                comment=data.get("comment"),
+            )
+            refund.info_data = {"gift_card": giftcard.pk}
+            refund.save()
+            order.log_action(
+                "pretix.event.order.refund.created",
+                {"local_id": refund.local_id, "provider": refund.provider},
+                user=user,
+                auth=request.auth,
+            )
+
+            try:
+                GiftCardPayment(request.event).execute_refund(refund)
+            except PaymentException as e:
+                refund.state = OrderRefund.REFUND_STATE_FAILED
+                refund.save(update_fields=["state"])
+                order.log_action(
+                    "pretix.event.order.refund.failed",
+                    {
+                        "local_id": refund.local_id,
+                        "provider": refund.provider,
+                        "error": str(e),
+                    },
+                    user=user,
+                    auth=request.auth,
+                )
+                return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        context = {
+            "request": request,
+            "organizer": request.organizer,
+            "event": request.event,
+        }
+        return Response(
+            {
+                "refund": OrderRefundSerializer(refund, context=context).data,
+                "giftcard": GiftCardSerializer(giftcard, context=context).data,
+            },
+            status=status.HTTP_201_CREATED,
         )
