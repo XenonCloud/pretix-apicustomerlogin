@@ -1,9 +1,14 @@
 from pretix.api.urls import event_router, orga_router
 
-from pretix_apicustomerlogin.views import CustomerApiLoginViewSet, OrderPaymentViewSet
+from pretix_apicustomerlogin.views import (
+    CustomerApiLoginViewSet,
+    GiftCardRefundViewSet,
+    OrderPaymentViewSet,
+)
 
 orga_router.register("customer_login", CustomerApiLoginViewSet, "customer_login")
 
 event_router.register("order_payment", OrderPaymentViewSet, "order_payment")
+event_router.register("giftcard_refunds", GiftCardRefundViewSet, "giftcard_refunds")
 
 urlpatterns = []
